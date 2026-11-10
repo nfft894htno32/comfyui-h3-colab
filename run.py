@@ -40,7 +40,6 @@ SKIP_RAM_PREWARM = os.environ.get("SKIP_RAM_PREWARM", "0") == "1"
 SNAPSHOT_SCHEMA = "v1"
 
 os.environ["HF_XET_CACHE"] = "/dev/shm/hf_xet"
-os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 CUSTOM_NODES = {
@@ -391,10 +390,11 @@ def ensure_comfyui_environment() -> None:
         local_tar = Path("/tmp/comfy_snapshot_build.tar.zst")
         lst_file.write_bytes(b"\0".join(p.encode("utf-8") for p in sorted(rel_files)) + b"\0")
 
+        zstd_env = {**os.environ, "ZSTD_NBTHREADS": "0", "ZSTD_CLEVEL": "3"}
         subprocess.run(
             [
                 "tar",
-                "--use-compress-program=zstd -T0 -3",
+                "--use-compress-program=zstd",
                 "--no-recursion",
                 "--null",
                 "-T",
@@ -404,6 +404,7 @@ def ensure_comfyui_environment() -> None:
                 "-C",
                 "/",
             ],
+            env=zstd_env,
             check=True,
         )
         part_path = DRIVE_ENV_CACHE / (snapshot_name + ".part")
@@ -614,7 +615,17 @@ def launch_comfyui() -> None:
     try:
         from google.colab import output
 
-        colab_proxy_url = output.eval_js("google.colab.kernel.proxyPort(8188)")
+        colab_proxy_url = output.eval_js(
+            "(() => {"
+            "  try {"
+            "    if (navigator.locks && !window.__comfyKeepAliveLock) {"
+            "      window.__comfyKeepAliveLock = true;"
+            "      navigator.locks.request('colab_comfyui_keepalive', () => new Promise(() => {}));"
+            "    }"
+            "  } catch (e) {}"
+            "  return google.colab.kernel.proxyPort(8188);"
+            "})()"
+        )
     except Exception:
         pass
 
