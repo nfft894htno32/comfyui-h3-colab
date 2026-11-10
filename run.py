@@ -55,7 +55,7 @@ MODEL_MANIFEST = [
         "repo_id": "Comfy-Org/MiniMax-H3",
         "filename": "diffusion_models/minimax_h3_fl2va_pruned_bf16.safetensors",
         "comfy_subdir": "diffusion_models",
-        "desc": "扩散主模型 (Pruned BF16 满血无损, 37.46 GiB)",
+        "desc": "图生/首尾帧底模 (FL2VA Pruned BF16, 37.46 GiB)",
     },
     {
         "repo_id": "Comfy-Org/MiniMax-H3",
@@ -79,9 +79,27 @@ MODEL_MANIFEST = [
         "repo_id": "Comfy-Org/MiniMax-H3",
         "filename": "loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
         "comfy_subdir": "loras",
-        "desc": "8步加速 LoRA (Turbo 8-Step BF16, 1.82 GiB)",
+        "desc": "图生 8步加速 LoRA (FL2V Turbo 8-Step BF16, 1.82 GiB)",
     },
 ]
+
+if os.environ.get("SKIP_REF2VA_MODELS", "0") != "1":
+    MODEL_MANIFEST.extend(
+        [
+            {
+                "repo_id": "Comfy-Org/MiniMax-H3",
+                "filename": "diffusion_models/minimax_h3_ref2va_pruned_bf16.safetensors",
+                "comfy_subdir": "diffusion_models",
+                "desc": "参考生视频专用底模 (Ref2VA Pruned BF16, 37.46 GiB)",
+            },
+            {
+                "repo_id": "Comfy-Org/MiniMax-H3",
+                "filename": "loras/minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
+                "comfy_subdir": "loras",
+                "desc": "参考生视频 4步快速预览 LoRA (Ref2V Turbo 4-Step BF16, 1.82 GiB)",
+            },
+        ]
+    )
 
 
 def log(msg: str) -> None:
@@ -458,11 +476,122 @@ def link_models_and_outputs() -> list[Path]:
     return drive_model_files
 
 
+def _build_default_ref2va_workflow(base_wf: dict) -> dict:
+    wf = json.loads(json.dumps(base_wf))
+    wf["last_link_id"] = max(int(wf.get("last_link_id") or 38), 39)
+    neutral_ref_prompt = (
+        "subject_definitions:\n"
+        "<Subject 1> 是 <Picture 1>、<Picture 2> 和 <Picture 3> 中的角色主体，完整保留其面部五官、发型发色、配饰细节与服装材质画风。\n"
+        "<Audio 1> 是 <Subject 1>（S1）的声音音色与说话语气参考。\n\n"
+        "summary:\n"
+        "[reference generation + audio reference] 目标视频生成一段高精细动画，<Subject 1> 在柔和室内光线下面向镜头微笑说话，完整保留其外貌、服装与画风，<Audio 1> 仅作为 <Subject 1> 的声音音色参考。\n\n"
+        "retention_analysis:\n"
+        "<Subject 1>（出现在 [Shot 1]）：fully_preserved - 人物身份、五官特征、发型配饰、服装材质与整体渲染画风完整保留。\n"
+        "<Audio 1>: reference - <Subject 1>（S1）参考 <Audio 1> 的音色与自然语调，不直接复制原始音频信号。\n\n"
+        "detailed_description:\n"
+        "[Shot 1] 中近景柔和镜头，无任何字幕与文字遮挡。画面建立 <Subject 1>，保留 <Picture 1> 与 <Picture 2> 中的外貌与穿搭特征，面向镜头自然微笑并轻微歪头，<Subject 1>（S1）用自然清晰的声线说道：<d>[Chinese] 你好，这里是多视角角色参考生视频高画质模式测试。</d> 口型与对白精准同步，呼吸与肢体动态自然流畅。\n\n"
+        "overall_soundscape:\n"
+        "安静柔和的室内环境底噪、轻微的衣物摩擦声与自然呼吸声。\n\n"
+        "non_diegetic_music:\n"
+        "N/A"
+    )
+    new_nodes = []
+    for node in wf.get("nodes", []):
+        ntype = node.get("type")
+        if ntype == "LoadImage" and node.get("id") == 15:
+            new_nodes.append(
+                {
+                    "id": 15,
+                    "type": "MiniMaxH3EasyMediaLoader",
+                    "pos": [-540.0, -680.0],
+                    "size": [480.0, 440.0],
+                    "flags": {},
+                    "order": 1,
+                    "mode": 0,
+                    "inputs": [],
+                    "outputs": [
+                        {
+                            "label": "媒体包",
+                            "name": "media_bundle",
+                            "type": "MINIMAX_H3_MEDIA_BUNDLE",
+                            "links": [39],
+                        }
+                    ],
+                    "properties": {
+                        "cnr_id": "comfyui-minimaxh3-easy",
+                        "Node name for S&R": "MiniMaxH3EasyMediaLoader",
+                    },
+                    "widgets_values": [""],
+                }
+            )
+            continue
+        elif ntype == "MiniMaxH3EasyLoader":
+            node["widgets_values"] = [
+                "无",
+                "minimax_h3_ref2va_pruned_bf16.safetensors",
+                "qwen3vl_32b_minimax_h3_int8_convrot.safetensors",
+                "minimax_h3_video_vae_fp16.safetensors",
+                "minimax_h3_audio_vae_fp32.safetensors",
+            ]
+        elif ntype == "LoraLoaderModelOnly":
+            node["mode"] = 4
+            node["widgets_values"] = [
+                "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
+                1.0,
+            ]
+        elif ntype == "BasicScheduler":
+            node["widgets_values"] = ["simple", 24, 1.0]
+        elif ntype == "KSamplerSelect":
+            node["widgets_values"] = ["res_multistep"]
+        elif ntype == "ModelAttentionBackend":
+            node["widgets_values"] = ["comfy kitchen attention"]
+        elif ntype == "SaveVideo":
+            node["widgets_values"] = ["video/MiniMaxH3_Ref2VA", "auto", "auto"]
+        elif ntype == "RAMCleanup":
+            node["widgets_values"] = [False, False, False, 1]
+            node["mode"] = 4
+        elif ntype == "MiniMaxH3Easy":
+            for inp in node.get("inputs", []):
+                if inp.get("name") == "media":
+                    inp["link"] = 39
+            node["widgets_values"] = [
+                "参考生视频",
+                neutral_ref_prompt,
+                None,
+                "832P",
+                "16:9",
+                1120,
+                640,
+                5,
+                False,
+                24,
+                "首帧优先",
+                "原图（不缩放）",
+                "按序号",
+                False,
+                "none",
+            ]
+            props = node.setdefault("properties", {})
+            props["minimax_h3_virtual_media_links"] = []
+            props["minimax_h3_prompt_view_mode"] = "raw"
+            if "minimax_h3_prompt_optimizer" in props:
+                props["minimax_h3_prompt_optimizer"]["enabled"] = False
+            props["minimax_h3_prompt_reference_doc"] = {
+                "version": 1,
+                "text": neutral_ref_prompt,
+                "parts": [{"type": "text", "text": neutral_ref_prompt}],
+            }
+        new_nodes.append(node)
+    wf["nodes"] = new_nodes
+    wf.setdefault("links", []).append([39, 15, 0, 2, 1, "MINIMAX_H3_MEDIA_BUNDLE"])
+    return wf
+
+
 def setup_and_sync_workflows() -> None:
     """
     优先加载你网盘中已有的私密工作流 JSON（如 MiniMax_H3_G4_8Step_漫画动起来.json 或 workflows/*.json），
-    并在后台实时将你在网页端 Ctrl+S 保存的工作流自动同步回网盘；
-    仅当网盘完全没有任何工作流时，才用中性占位提示词生成默认 8 步极速模板。
+    若尚未建立专门的参考生视频工作流，则自动补齐一份独立的 24 步高画质参考生视频模板（不改动原有工作流），
+    并在后台实时将你在网页端 Ctrl+S 保存的工作流自动同步回网盘。
     """
     user_wf_dir = COMFY_DIR / "user" / "default" / "workflows"
     user_wf_dir.mkdir(parents=True, exist_ok=True)
@@ -473,76 +602,83 @@ def setup_and_sync_workflows() -> None:
         if not target_in_wf.exists():
             shutil.copy2(root_json, target_in_wf)
 
+    easy_wf_src = COMFY_DIR / "custom_nodes" / "ComfyUI-MiniMaxH3-Easy" / "workflow" / "1.MiniMax_H3_Easy.json"
     existing_drive_wfs = sorted(DRIVE_WORKFLOWS.glob("*.json"))
+
+    if not existing_drive_wfs and easy_wf_src.exists():
+        wf = json.loads(easy_wf_src.read_text(encoding="utf-8"))
+        neutral_prompt = (
+            "How the reference pictures align with the target video — Picture 1 (from Shot 1) aligns with the 0.00-second mark of the target video.\n\n"
+            "integrated_multimodal_description: [Shot 1] 固定三脚架机位，画面构图全程保持静止，镜头不推拉、不摇移。画面中的动漫角色自然站在户外场景中 <Picture 1>，微风轻轻拂动发丝与衣角，眼神自然眨动并开口说话，画面文字框保持静止不动。角色用自然清晰的中文说道：<d> \"你好，欢迎来到动画测试场景。\" </d>\n"
+            "overall_soundscape: 轻柔的户外环境音、细微的衣物摩擦声，以及自然清晰的中文配音。\n"
+            "non_diegetic_music: N/A"
+        )
+        for node in wf.get("nodes", []):
+            ntype = node.get("type")
+            if ntype == "MiniMaxH3EasyLoader":
+                node["widgets_values"] = [
+                    "minimax_h3_fl2va_pruned_bf16.safetensors",
+                    "无",
+                    "qwen3vl_32b_minimax_h3_int8_convrot.safetensors",
+                    "minimax_h3_video_vae_fp16.safetensors",
+                    "minimax_h3_audio_vae_fp32.safetensors",
+                ]
+            elif ntype == "LoraLoaderModelOnly":
+                node["widgets_values"] = [
+                    "minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
+                    1.0,
+                ]
+            elif ntype == "BasicScheduler":
+                node["widgets_values"] = ["simple", 8, 1.0]
+            elif ntype == "ModelAttentionBackend":
+                node["widgets_values"] = ["comfy kitchen attention"]
+            elif ntype == "RAMCleanup":
+                node["widgets_values"] = [False, False, False, 1]
+                node["mode"] = 4
+            elif ntype == "MiniMaxH3Easy":
+                node["widgets_values"] = [
+                    "图生或首尾帧",
+                    neutral_prompt,
+                    None,
+                    "768P",
+                    "2:3",
+                    832,
+                    1216,
+                    5,
+                    False,
+                    24,
+                    "首帧优先",
+                    "原图（不缩放）",
+                    "按序号",
+                    False,
+                    "none",
+                ]
+                if "properties" in node:
+                    if "minimax_h3_prompt_optimizer" in node["properties"]:
+                        node["properties"]["minimax_h3_prompt_optimizer"]["enabled"] = False
+                    node["properties"]["minimax_h3_prompt_reference_doc"] = {
+                        "version": 1,
+                        "text": neutral_prompt,
+                        "parts": [{"type": "text", "text": neutral_prompt}],
+                    }
+
+        default_name = "MiniMax_H3_G4_8Step_Default.json"
+        (DRIVE_WORKFLOWS / default_name).write_text(json.dumps(wf, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # 若网盘尚无专门的参考生视频工作流，则自动创建一份独立工作流（绝不覆盖已有工作流）
+    has_ref_wf = any(("参考生视频" in p.name or "ref2va" in p.name.lower()) for p in DRIVE_WORKFLOWS.glob("*.json"))
+    if not has_ref_wf and easy_wf_src.exists() and os.environ.get("SKIP_REF2VA_MODELS", "0") != "1":
+        ref_wf = _build_default_ref2va_workflow(json.loads(easy_wf_src.read_text(encoding="utf-8")))
+        ref_name = "MiniMax_H3_G4_参考生视频_24步高画质.json"
+        (DRIVE_WORKFLOWS / ref_name).write_text(json.dumps(ref_wf, ensure_ascii=False, indent=2), encoding="utf-8")
+        log(f"✅ 已自动新增独立的参考生视频专用工作流: {ref_name}")
+
+    existing_drive_wfs = sorted(DRIVE_WORKFLOWS.glob("*.json"))
+    for wf_file in existing_drive_wfs:
+        shutil.copy2(wf_file, user_wf_dir / wf_file.name)
     if existing_drive_wfs:
-        for wf_file in existing_drive_wfs:
-            shutil.copy2(wf_file, user_wf_dir / wf_file.name)
         names_str = ", ".join(p.name for p in existing_drive_wfs)
         log(f"✅ 已从网盘加载你的专属工作流 ({len(existing_drive_wfs)} 个): {names_str}")
-    else:
-        easy_wf_src = COMFY_DIR / "custom_nodes" / "ComfyUI-MiniMaxH3-Easy" / "workflow" / "1.MiniMax_H3_Easy.json"
-        if easy_wf_src.exists():
-            wf = json.loads(easy_wf_src.read_text(encoding="utf-8"))
-            neutral_prompt = (
-                "How the reference pictures align with the target video — Picture 1 (from Shot 1) aligns with the 0.00-second mark of the target video.\n\n"
-                "integrated_multimodal_description: [Shot 1] 固定三脚架机位，画面构图全程保持静止，镜头不推拉、不摇移。画面中的动漫角色自然站在户外场景中 <Picture 1>，微风轻轻拂动发丝与衣角，眼神自然眨动并开口说话，画面文字框保持静止不动。角色用自然清晰的中文说道：<d> \"你好，欢迎来到动画测试场景。\" </d>\n"
-                "overall_soundscape: 轻柔的户外环境音、细微的衣物摩擦声，以及自然清晰的中文配音。\n"
-                "non_diegetic_music: N/A"
-            )
-            for node in wf.get("nodes", []):
-                ntype = node.get("type")
-                if ntype == "MiniMaxH3EasyLoader":
-                    node["widgets_values"] = [
-                        "minimax_h3_fl2va_pruned_bf16.safetensors",
-                        "无",
-                        "qwen3vl_32b_minimax_h3_int8_convrot.safetensors",
-                        "minimax_h3_video_vae_fp16.safetensors",
-                        "minimax_h3_audio_vae_fp32.safetensors",
-                    ]
-                elif ntype == "LoraLoaderModelOnly":
-                    node["widgets_values"] = [
-                        "minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
-                        1.0,
-                    ]
-                elif ntype == "BasicScheduler":
-                    node["widgets_values"] = ["simple", 8, 1.0]
-                elif ntype == "ModelAttentionBackend":
-                    node["widgets_values"] = ["comfy kitchen attention"]
-                elif ntype == "RAMCleanup":
-                    node["widgets_values"] = [False, False, False, 1]
-                    node["mode"] = 4
-                elif ntype == "MiniMaxH3Easy":
-                    node["widgets_values"] = [
-                        "图生或首尾帧",
-                        neutral_prompt,
-                        None,
-                        "768P",
-                        "2:3",
-                        832,
-                        1216,
-                        5,
-                        False,
-                        24,
-                        "首帧优先",
-                        "原图（不缩放）",
-                        "按序号",
-                        False,
-                        "none",
-                    ]
-                    if "properties" in node:
-                        if "minimax_h3_prompt_optimizer" in node["properties"]:
-                            node["properties"]["minimax_h3_prompt_optimizer"]["enabled"] = False
-                        node["properties"]["minimax_h3_prompt_reference_doc"] = {
-                            "version": 1,
-                            "text": neutral_prompt,
-                            "parts": [{"type": "text", "text": neutral_prompt}],
-                        }
-
-            default_name = "MiniMax_H3_G4_8Step_Default.json"
-            wf_text = json.dumps(wf, ensure_ascii=False, indent=2)
-            (user_wf_dir / default_name).write_text(wf_text, encoding="utf-8")
-            (DRIVE_WORKFLOWS / default_name).write_text(wf_text, encoding="utf-8")
-            log(f"✅ 已初始化默认 8 步极速工作流模板: {default_name}")
 
     # 启动后台轻量同步线程：你在 ComfyUI 网页端保存的任何工作流修改，每 5 秒自动持久化回 Google Drive
     synced_mtimes: dict[str, int] = {
@@ -565,10 +701,33 @@ def setup_and_sync_workflows() -> None:
 
 
 # ==============================================================================
-# 4. 后台非阻塞 70 GiB 模型内存缓存预热 (不卡网页启动，零内存分配读取)
+# 4. 后台非阻塞模型内存缓存预热 (不卡网页启动，自适应可用内存容量)
 # ==============================================================================
 def start_background_ram_prewarm(model_files: list[Path]) -> None:
     if SKIP_RAM_PREWARM:
+        return
+
+    avail_bytes = 140 * (1024**3)
+    try:
+        meminfo = Path("/proc/meminfo").read_text(encoding="utf-8")
+        m = re.search(r"MemAvailable:\s+(\d+)\s+kB", meminfo)
+        if m:
+            avail_bytes = max(0, int(m.group(1)) * 1024 - 24 * (1024**3))
+    except Exception:
+        pass
+
+    warm_targets: list[Path] = []
+    budget = 0
+    for f in model_files:
+        try:
+            sz = f.stat().st_size
+        except OSError:
+            continue
+        if budget + sz <= avail_bytes:
+            warm_targets.append(f)
+            budget += sz
+
+    if not warm_targets:
         return
 
     def _warm_one(fpath: Path) -> int:
@@ -597,13 +756,14 @@ def start_background_ram_prewarm(model_files: list[Path]) -> None:
         t0 = time.time()
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-                total_b = sum(pool.map(_warm_one, model_files))
+                total_b = sum(pool.map(_warm_one, warm_targets))
             gib = total_b / (1024**3)
-            log(f"🔥 [后台预热完成] 全部 {len(model_files)} 个模型 ({gib:.1f} GiB) 已常驻系统内存缓存 (耗时 {time.time() - t0:.1f}s)！")
+            log(f"🔥 [后台预热完成] {len(warm_targets)} 个模型 ({gib:.1f} GiB) 已常驻系统内存缓存 (耗时 {time.time() - t0:.1f}s)！")
         except Exception as exc:
             log(f"⚠️ 后台模型预热提示: {exc}")
 
-    log("🚀 已在后台启动 70 GiB 模型内存预热（不阻塞网页启动，你打开网页选图期间即可自动完成）...")
+    plan_gib = budget / (1024**3)
+    log(f"🚀 已在后台启动 {plan_gib:.1f} GiB 模型内存预热（不阻塞网页启动，你打开网页选图期间即可自动完成）...")
     threading.Thread(target=_runner, daemon=True).start()
 
 
