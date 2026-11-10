@@ -101,6 +101,24 @@ if os.environ.get("SKIP_REF2VA_MODELS", "0") != "1":
         ]
     )
 
+if os.environ.get("SKIP_IMAGE_MODELS", "0") != "1":
+    MODEL_MANIFEST.extend(
+        [
+            {
+                "repo_id": "Comfy-Org/MiniMax-H3-Image",
+                "filename": "diffusion_models/minimax_h3_image_pruned_int8_convrot.safetensors",
+                "comfy_subdir": "diffusion_models",
+                "desc": "H3 生图/换装改图底模 (MMH3I Pruned INT8 ConvRot, 19.54 GiB)",
+            },
+            {
+                "repo_id": "Comfy-Org/MiniMax-H3-Image",
+                "filename": "vae/minimax_h3_image_vae_fp16.safetensors",
+                "comfy_subdir": "vae",
+                "desc": "H3 图像专用 VAE (Image VAE FP16, 1.09 GiB)",
+            },
+        ]
+    )
+
 
 def log(msg: str) -> None:
     print(msg, flush=True)
@@ -587,6 +605,14 @@ def _build_default_ref2va_workflow(base_wf: dict) -> dict:
     return wf
 
 
+def _build_default_mmh3i_workflow() -> dict:
+    import base64 as _b64
+    import zlib as _zlib
+
+    _payload = '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'
+    return json.loads(_zlib.decompress(_b64.b64decode(_payload)).decode("utf-8"))
+
+
 def setup_and_sync_workflows() -> None:
     """
     优先加载你网盘中已有的私密工作流 JSON（如 MiniMax_H3_G4_8Step_漫画动起来.json 或 workflows/*.json），
@@ -672,6 +698,14 @@ def setup_and_sync_workflows() -> None:
         ref_name = "MiniMax_H3_G4_参考生视频_24步高画质.json"
         (DRIVE_WORKFLOWS / ref_name).write_text(json.dumps(ref_wf, ensure_ascii=False, indent=2), encoding="utf-8")
         log(f"✅ 已自动新增独立的参考生视频专用工作流: {ref_name}")
+
+    # 若网盘尚无 MMH3I 生图/换装工作流，则自动补齐已修正 Linux 模型路径的官方生图工作流
+    has_img_wf = any(("mmh3i" in p.name.lower() or "h3_image" in p.name.lower()) for p in DRIVE_WORKFLOWS.glob("*.json"))
+    if not has_img_wf and os.environ.get("SKIP_IMAGE_MODELS", "0") != "1":
+        mmh3i_wf = _build_default_mmh3i_workflow()
+        img_wf_name = "MiniMax_H3_Image_角色设定与换装生图.json"
+        (DRIVE_WORKFLOWS / img_wf_name).write_text(json.dumps(mmh3i_wf, ensure_ascii=False, indent=2), encoding="utf-8")
+        log(f"✅ 已自动新增 H3 生图/换装工作流: {img_wf_name}")
 
     existing_drive_wfs = sorted(DRIVE_WORKFLOWS.glob("*.json"))
     for wf_file in existing_drive_wfs:
