@@ -771,6 +771,10 @@ def start_background_ram_prewarm(model_files: list[Path]) -> None:
 # 5. 启动官方直连专线 + Cloudflare HTTP/2 备用隧道 + ComfyUI 主进程
 # ==============================================================================
 def launch_comfyui() -> None:
+    import codecs
+    import errno
+    import struct
+
     colab_proxy_url = None
     try:
         from google.colab import output
@@ -789,6 +793,45 @@ def launch_comfyui() -> None:
     except Exception:
         pass
 
+    def _render_banner(cf_url: str | None = None, ready: bool = False) -> None:
+        try:
+            from IPython.display import HTML, display, update_display
+
+            status_badge = (
+                "<span style='background:#16a34a;color:#fff;padding:2px 8px;border-radius:999px;font-size:12px;'>● 运行中 (8188 就绪)</span>"
+                if ready
+                else "<span style='background:#d97706;color:#fff;padding:2px 8px;border-radius:999px;font-size:12px;'>⏳ 正在启动 ComfyUI 引擎...</span>"
+            )
+            main_link = (
+                f"<div style='margin-top:8px;'>🚀 <b>高速主线路（官方直连）：</b> "
+                f"<a href='{colab_proxy_url}' target='_blank' style='color:#2563eb;font-weight:700;text-decoration:underline;'>{colab_proxy_url}</a></div>"
+                if colab_proxy_url
+                else ""
+            )
+            cf_link = (
+                f"<div style='margin-top:4px;'>🌐 <b>备用线路（Cloudflare）：</b> "
+                f"<a href='{cf_url}' target='_blank' style='color:#0ea5e9;text-decoration:underline;'>{cf_url}</a></div>"
+                if cf_url
+                else ""
+            )
+            html = (
+                "<div style='border:1px solid #cbd5e1;background:#f8fafc;color:#0f172a;padding:12px 16px;"
+                "border-radius:10px;margin:8px 0;font-family:system-ui,sans-serif;line-height:1.6;'>"
+                f"<div><b>🎬 ComfyUI 服务控制台</b> &nbsp;{status_badge}</div>"
+                f"{main_link}{cf_link}"
+                "<div style='margin-top:6px;font-size:12px;color:#475569;'>👇 下方实时输出 ComfyUI 详细运行日志、模型加载状态与采样进度条：</div>"
+                "</div>"
+            )
+            if not getattr(_render_banner, "_initialized", False):
+                display(HTML(html), display_id="comfy_live_banner")
+                setattr(_render_banner, "_initialized", True)
+            else:
+                update_display(HTML(html), display_id="comfy_live_banner")
+        except Exception:
+            pass
+
+    _render_banner(ready=False)
+
     def _start_tunnels() -> None:
         while True:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -796,6 +839,7 @@ def launch_comfyui() -> None:
                     break
             time.sleep(0.5)
 
+        _render_banner(ready=True)
         log("\n" + "=" * 84)
         if colab_proxy_url:
             log("🚀 【高速主线路 - 强烈推荐】Google Colab 官方直连专线（与当前网页同速，绝不卡顿）：")
@@ -804,7 +848,7 @@ def launch_comfyui() -> None:
 
         if CLOUDFLARED_BIN.exists():
             try:
-                proc = subprocess.Popen(
+                cf_proc = subprocess.Popen(
                     [
                         str(CLOUDFLARED_BIN),
                         "tunnel",
@@ -818,11 +862,13 @@ def launch_comfyui() -> None:
                     stderr=subprocess.STDOUT,
                     text=True,
                 )
-                assert proc.stdout is not None
-                for line in proc.stdout:
+                assert cf_proc.stdout is not None
+                for line in cf_proc.stdout:
                     match = re.search(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com", line)
                     if match:
-                        log(f"🌐 【备用线路】Cloudflare HTTP/2 隧道：{match.group(0)}")
+                        cf_url = match.group(0)
+                        _render_banner(cf_url=cf_url, ready=True)
+                        log(f"🌐 【备用线路】Cloudflare HTTP/2 隧道：{cf_url}")
                         log("=" * 84 + "\n")
                         break
             except Exception as exc:
@@ -830,25 +876,104 @@ def launch_comfyui() -> None:
 
     threading.Thread(target=_start_tunnels, daemon=True).start()
 
-    log("🎬 正在启动高速版 ComfyUI (--highvram + Gzip 响应压缩)...")
+    log("🎬 正在启动高速版 ComfyUI (--highvram + Gzip 响应压缩 + 实时详细日志流)...")
+    cmd = [
+        sys.executable,
+        "-u",
+        "main.py",
+        "--listen",
+        "0.0.0.0",
+        "--port",
+        "8188",
+        "--enable-cors-header",
+        "--enable-compress-response-body",
+        "--highvram",
+        "--verbose",
+        "INFO",
+    ]
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    env["TERM"] = "xterm-256color"
+    env["TQDM_MININTERVAL"] = "0.5"
+
+    # 使用伪终端 (PTY) 将子进程日志与 tqdm 采样进度条实时桥接到 Colab 单元格输出
     try:
-        subprocess.run(
-            [
-                sys.executable,
-                "main.py",
-                "--listen",
-                "0.0.0.0",
-                "--port",
-                "8188",
-                "--enable-cors-header",
-                "--enable-compress-response-body",
-                "--highvram",
-            ],
+        import fcntl
+        import pty
+        import termios
+
+        master_fd, slave_fd = pty.openpty()
+        try:
+            fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
+        except Exception:
+            pass
+
+        proc = subprocess.Popen(
+            cmd,
             cwd=str(COMFY_DIR),
-            check=True,
+            stdin=subprocess.DEVNULL,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            env=env,
+            close_fds=True,
         )
-    except KeyboardInterrupt:
-        log("\n🛑 ComfyUI 服务已手动停止。")
+        os.close(slave_fd)
+
+        decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        log_file_path = Path("/content/comfyui_live.log")
+        try:
+            with open(log_file_path, "a", encoding="utf-8", buffering=1) as lf:
+                while True:
+                    try:
+                        chunk = os.read(master_fd, 4096)
+                        if not chunk:
+                            break
+                    except OSError as exc:
+                        if exc.errno == errno.EIO:
+                            break
+                        raise
+                    text = decoder.decode(chunk, final=False)
+                    if text:
+                        sys.stdout.write(text)
+                        sys.stdout.flush()
+                        lf.write(text.replace("\r", "\n"))
+            tail = decoder.decode(b"", final=True)
+            if tail:
+                sys.stdout.write(tail)
+                sys.stdout.flush()
+            proc.wait()
+        except KeyboardInterrupt:
+            log("\n🛑 ComfyUI 服务已手动停止。")
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        finally:
+            try:
+                os.close(master_fd)
+            except OSError:
+                pass
+    except ImportError:
+        # 非 Linux 环境兜底
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(COMFY_DIR),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=env,
+            text=True,
+            bufsize=1,
+        )
+        try:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                sys.stdout.write(line)
+                sys.stdout.flush()
+            proc.wait()
+        except KeyboardInterrupt:
+            log("\n🛑 ComfyUI 服务已手动停止。")
+            proc.terminate()
 
 
 def main() -> None:
