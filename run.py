@@ -793,14 +793,59 @@ def launch_comfyui() -> None:
     except Exception:
         pass
 
-    def _render_banner(cf_url: str | None = None, ready: bool = False) -> None:
+    state = {"cf_url": None, "ready": False, "t0": time.time()}
+
+    def _query_hw_stats() -> str:
+        parts: list[str] = []
+        try:
+            out = subprocess.check_output(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=utilization.gpu,memory.used,memory.total",
+                    "--format=csv,noheader,nounits",
+                ],
+                text=True,
+                timeout=2,
+            ).strip()
+            if out:
+                u_str, used_str, tot_str = [x.strip() for x in out.splitlines()[0].split(",")[:3]]
+                parts.append(f"GPU {u_str}%")
+                parts.append(f"显存 {float(used_str)/1024:.1f}/{float(tot_str)/1024:.1f} GB")
+        except Exception:
+            pass
+        try:
+            mem = Path("/proc/meminfo").read_text(encoding="utf-8")
+            mt = re.search(r"MemTotal:\s+(\d+)\s+kB", mem)
+            ma = re.search(r"MemAvailable:\s+(\d+)\s+kB", mem)
+            if mt and ma:
+                tot_g = int(mt.group(1)) / (1024 * 1024)
+                used_g = tot_g - int(ma.group(1)) / (1024 * 1024)
+                parts.append(f"内存 {used_g:.1f}/{tot_g:.1f} GB")
+        except Exception:
+            pass
+        elapsed = int(time.time() - state["t0"])
+        parts.append(f"WS保活 {elapsed // 60}m{elapsed % 60:02d}s")
+        return " · ".join(parts)
+
+    def _render_banner(cf_url: str | None = None, ready: bool | None = None) -> None:
+        if cf_url is not None:
+            state["cf_url"] = cf_url
+        if ready is not None:
+            state["ready"] = ready
         try:
             from IPython.display import HTML, display, update_display
 
+            is_ready = bool(state["ready"])
+            cur_cf = state["cf_url"]
+            hw_text = _query_hw_stats()
             status_badge = (
                 "<span style='background:#16a34a;color:#fff;padding:2px 8px;border-radius:999px;font-size:12px;'>● 运行中 (8188 就绪)</span>"
-                if ready
+                if is_ready
                 else "<span style='background:#d97706;color:#fff;padding:2px 8px;border-radius:999px;font-size:12px;'>⏳ 正在启动 ComfyUI 引擎...</span>"
+            )
+            hw_badge = (
+                f"<span style='background:#e2e8f0;color:#1e293b;padding:2px 8px;border-radius:6px;font-size:12px;margin-left:6px;'>"
+                f"{hw_text}</span>"
             )
             main_link = (
                 f"<div style='margin-top:8px;'>🚀 <b>高速主线路（官方直连）：</b> "
@@ -810,14 +855,14 @@ def launch_comfyui() -> None:
             )
             cf_link = (
                 f"<div style='margin-top:4px;'>🌐 <b>备用线路（Cloudflare）：</b> "
-                f"<a href='{cf_url}' target='_blank' style='color:#0ea5e9;text-decoration:underline;'>{cf_url}</a></div>"
-                if cf_url
+                f"<a href='{cur_cf}' target='_blank' style='color:#0ea5e9;text-decoration:underline;'>{cur_cf}</a></div>"
+                if cur_cf
                 else ""
             )
             html = (
                 "<div style='border:1px solid #cbd5e1;background:#f8fafc;color:#0f172a;padding:12px 16px;"
                 "border-radius:10px;margin:8px 0;font-family:system-ui,sans-serif;line-height:1.6;'>"
-                f"<div><b>🎬 ComfyUI 服务控制台</b> &nbsp;{status_badge}</div>"
+                f"<div><b>🎬 ComfyUI 服务控制台</b> &nbsp;{status_badge}{hw_badge}</div>"
                 f"{main_link}{cf_link}"
                 "<div style='margin-top:6px;font-size:12px;color:#475569;'>👇 下方实时输出 ComfyUI 详细运行日志、模型加载状态与采样进度条：</div>"
                 "</div>"
@@ -831,6 +876,14 @@ def launch_comfyui() -> None:
             pass
 
     _render_banner(ready=False)
+
+    # 每 15 秒向浏览器主动推送一次 IOPub WebSocket 心跳包并刷新硬件占用，防止代理/NAT 空闲断流
+    def _ws_keepalive_loop() -> None:
+        while True:
+            time.sleep(15)
+            _render_banner()
+
+    threading.Thread(target=_ws_keepalive_loop, daemon=True).start()
 
     def _start_tunnels() -> None:
         while True:
